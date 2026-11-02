@@ -1,0 +1,37 @@
+replicaCount: 2
+
+image:
+  repository: tensorsurge.azurecr.io/tensor-surge
+  tag: latest
+  pullPolicy: IfNotPresent
+
+resources:
+  limits:
+    nvidia.com/gpu: 1
+    cpu: "4"
+    memory: 16Gi
+  requests:
+    nvidia.com/gpu: 1
+    cpu: "2"
+    memory: 8Gi
+
+nodeSelector:
+  accelerator: nvidia
+  workload: inference
+
+tolerations:
+  - key: "sku"
+    operator: "Equal"
+    value: "gpu"
+    effect: "NoSchedule"
+
+service:
+  type: LoadBalancer
+  grpcPort: 50051
+  httpPort: 8000
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetGPUUtilizationPercentage: 75

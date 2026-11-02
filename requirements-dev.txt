@@ -1,0 +1,6 @@
+-r requirements.txt
+triton>=2.2.0; platform_system != "Windows"
+locust>=2.20.0
+pytest>=8.0.0
+fastapi>=0.110.0
+uvicorn>=0.28.0

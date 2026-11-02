@@ -1,0 +1,10 @@
+apiVersion: v2
+name: tensor-surge
+description: Production Helm chart for TensorSurge LLM Serving Engine with PagedAttention and Triton Kernels
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - llm
+  - paged-attention
+  - triton
+  - inference-engine
