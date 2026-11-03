@@ -196,7 +196,7 @@ $$
 
 **Copy-on-Write (CoW) Forking:**
 When parallel sampling branches fork from a shared prompt, child sequences inherit parent `BlockTable` pointers and increment `ref_count` without copying tensors:
-- If $\text{ref\_count} > 1$ and a new token is appended to the block, a free block is allocated, the tail contents are duplicated, and the reference count is decremented.
+- If `ref_count` > 1 and a new token is appended to the block, a free block is allocated, the tail contents are duplicated, and the reference count is decremented.
 - Achieves O(1) instant sequence branching with near 100% memory efficiency.
 
 ---
