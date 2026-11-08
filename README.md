@@ -97,16 +97,26 @@ $$
 
 Materializing the intermediate score matrix $S = \frac{QK^T}{\sqrt{d_k}} \in \mathbb{R}^{N \times N}$ requires $O(N^2)$ memory bandwidth and storage. FlashAttention tiles $Q, K, V$ into blocks that fit entirely in SRAM ($B_r = 64, B_c = 64$) and evaluates the running online softmax incrementally:
 
-For sequence length $N$ partitioned into blocks of column size $B_c$:
+For sequence length $N$ partitioned into blocks of column size $B_c$, the running max $m$, scale factor $\alpha$, normalizer $\ell$, and output accumulator $O$ update incrementally:
 
 $$
-\begin{aligned}
-m^{(j)} &= \max\left(m^{(j-1)}, \max_{k \in B_c} S_{i,k}\right) \\
-\alpha^{(j)} &= \exp\left(m^{(j-1)} - m^{(j)}\right) \\
-\ell^{(j)} &= \ell^{(j-1)} \cdot \alpha^{(j)} + \sum_{k \in B_c} \exp\left(S_{i,k} - m^{(j)}\right) \\
-O^{(j)} &= O^{(j-1)} \cdot \alpha^{(j)} + \sum_{k \in B_c} \exp\left(S_{i,k} - m^{(j)}\right) V_k \\
-O &= \frac{O^{(\text{final})}}{\ell^{(\text{final})}}
-\end{aligned}
+m^{(j)} = \max\left(m^{(j-1)}, \max_{k \in B_c} S_{i,k}\right)
+$$
+
+$$
+\alpha^{(j)} = \exp\left(m^{(j-1)} - m^{(j)}\right)
+$$
+
+$$
+\ell^{(j)} = \ell^{(j-1)} \cdot \alpha^{(j)} + \sum_{k \in B_c} \exp\left(S_{i,k} - m^{(j)}\right)
+$$
+
+$$
+O^{(j)} = O^{(j-1)} \cdot \alpha^{(j)} + \sum_{k \in B_c} \exp\left(S_{i,k} - m^{(j)}\right) V_k
+$$
+
+$$
+O = \frac{O^{(\text{final})}}{\ell^{(\text{final})}}
 $$
 
 This recurrence rescales the output accumulator $O^{(j)}$ on the fly without writing or reading the $N \times N$ attention matrix to HBM, cutting memory footprint from $O(N^2)$ to $O(N)$.
@@ -137,9 +147,9 @@ Fused SwiGLU in GPU SRAM:
 
 **Memory Bandwidth Analysis (FP32, Element Count $N$):**
 - **PyTorch Eager**:
-  1. Read `gate` ($4N$ bytes) $\to$ compute $\sigma(\text{gate})$ $\to$ write `sig` ($4N$ bytes)
-  2. Read `gate` & `sig` ($8N$ bytes) $\to$ compute $\text{silu}$ $\to$ write `silu` ($4N$ bytes)
-  3. Read `silu` & `up` ($8N$ bytes) $\to$ compute $\text{silu} \odot \text{up}$ $\to$ write `out` ($4N$ bytes)
+  1. Read `gate` ($4N$ bytes) → compute $\sigma(\text{gate})$ → write `sig` ($4N$ bytes)
+  2. Read `gate` & `sig` ($8N$ bytes) → compute $\text{silu}$ → write `silu` ($4N$ bytes)
+  3. Read `silu` & `up` ($8N$ bytes) → compute $\text{silu} \odot \text{up}$ → write `out` ($4N$ bytes)
   - **Total Eager Traffic**: $5\text{ reads} + 3\text{ writes} = 8N \times 4\text{ bytes} = 32N\text{ bytes}$.
 - **Triton Fused Kernel**:
   1. Load tile `gate` and `up` directly into registers ($2\text{ reads} = 8N\text{ bytes}$).
@@ -147,22 +157,30 @@ Fused SwiGLU in GPU SRAM:
   3. Store result tile `out` directly to HBM ($1\text{ write} = 4N\text{ bytes}$).
   - **Total Fused Traffic**: $2\text{ reads} + 1\text{ write} = 3N \times 4\text{ bytes} = 12N\text{ bytes}$.
 
-$$
-\text{Traffic Saved} = 1 - \frac{12N}{32N} = 1 - 0.375 = 62.5\%
-$$
+**Traffic Reduction & Arithmetic Intensity:**
 
 $$
-I = \frac{\text{Total Floating Point Operations}}{\text{Total Bytes Transferred}} = \frac{6 \text{ FLOPs}}{12 \text{ Bytes}} = 0.50 \text{ FLOPs/Byte}
+\text{Traffic Reduction Ratio} = 1 - \frac{12N}{32N} = 1 - 0.375 = 0.625
+$$
+
+> **Key Result**: Fusing activation passes yields a **62.5% reduction** in High-Bandwidth Memory (HBM) traffic compared to PyTorch eager execution.
+
+$$
+I = \frac{\text{Total Operations}}{\text{Total Bytes Transferred}} = \frac{6 \text{ FLOPs}}{12 \text{ Bytes}} = 0.50 \text{ FLOPs/Byte}
 $$
 
 **Analytical Backward Gradient:**
 
 $$
-\begin{aligned}
-\frac{\partial \text{silu}(g)}{\partial g} &= \sigma(g) \cdot \left(1 + g \cdot (1 - \sigma(g))\right) \\
-\frac{\partial \mathcal{L}}{\partial g} &= \frac{\partial \mathcal{L}}{\partial \text{out}} \odot \text{up} \odot \frac{\partial \text{silu}(g)}{\partial g} \\
-\frac{\partial \mathcal{L}}{\partial \text{up}} &= \frac{\partial \mathcal{L}}{\partial \text{out}} \odot \text{silu}(g)
-\end{aligned}
+\frac{\partial \text{silu}(g)}{\partial g} = \sigma(g) \cdot \left(1 + g \cdot (1 - \sigma(g))\right)
+$$
+
+$$
+\frac{\partial \mathcal{L}}{\partial g} = \frac{\partial \mathcal{L}}{\partial \text{out}} \odot \text{up} \odot \frac{\partial \text{silu}(g)}{\partial g}
+$$
+
+$$
+\frac{\partial \mathcal{L}}{\partial \text{up}} = \frac{\partial \mathcal{L}}{\partial \text{out}} \odot \text{silu}(g)
 $$
 
 ### 3.3. PagedAttention Virtual Address Translation
@@ -183,21 +201,24 @@ Physical Block #42   Physical Block #7    Physical Block #108
 (Physical KV Cache)  (Physical KV Cache)  (Physical KV Cache)
 ```
 
-For logical sequence $s$ and token position $t$:
+For logical sequence $s$ and token position $t$, the virtual-to-physical address translation is:
 
 $$
-\begin{aligned}
-\text{LogicalBlockIndex} &= \left\lfloor \frac{t}{B} \right\rfloor \\
-\text{BlockOffset} &= t \pmod B \\
-\text{PhysicalBlockID} &= \text{BlockTable}[s][\text{LogicalBlockIndex}] \\
-\text{PhysicalMemoryAddress} &= \text{PhysicalBlockID} \times B + \text{BlockOffset}
-\end{aligned}
+\text{LogicalBlockIndex} = \left\lfloor \frac{t}{B} \right\rfloor, \quad \text{BlockOffset} = t \pmod B
+$$
+
+$$
+\text{PhysicalBlockID} = \text{BlockTable}[s][\text{LogicalBlockIndex}]
+$$
+
+$$
+\text{PhysicalMemoryAddress} = \text{PhysicalBlockID} \times B + \text{BlockOffset}
 $$
 
 **Copy-on-Write (CoW) Forking:**
 When parallel sampling branches fork from a shared prompt, child sequences inherit parent `BlockTable` pointers and increment `ref_count` without copying tensors:
 - If `ref_count` > 1 and a new token is appended to the block, a free block is allocated, the tail contents are duplicated, and the reference count is decremented.
-- Achieves O(1) instant sequence branching with near 100% memory efficiency.
+- Achieves $O(1)$ instant sequence branching with near 100% memory efficiency.
 
 ---
 
@@ -214,7 +235,7 @@ When parallel sampling branches fork from a shared prompt, child sequences inher
 | **4096** | `72.10 ms` | `26.40 ms` | **2.73x** | O(N) vs O(N^2) |
 
 ### 4.2. Fused SwiGLU Activation Performance
-*Benchmarked with hidden dimension $4096$ and batch dimension $2048$:*
+*Benchmarked with hidden dimension 4096 and batch dimension 2048:*
 
 | Metric | PyTorch Eager Mode | Triton Fused Kernel | Performance Advantage |
 |:---|:---:|:---:|:---:|
@@ -230,8 +251,8 @@ When parallel sampling branches fork from a shared prompt, child sequences inher
 | Architectural Metric | Contiguous Buffer Allocation | PagedAttention Virtual Blocks | System Benefit |
 |:---|:---:|:---:|:---:|
 | **Block Allocation Unit** | Full Max Sequence Length | Fixed $B = 16$ Tokens | Granular dynamic paging |
-| **External Fragmentation** | 35% – 50% | **0.0%** | Completely eliminated |
-| **Internal Fragmentation** | 20% – 40% | **< 3.8%** (avg. 8 tokens) | Negligible tail waste |
+| **External Fragmentation** | 35% - 50% | **0.0%** | Completely eliminated |
+| **Internal Fragmentation** | 20% - 40% | **< 3.8%** (avg. 8 tokens) | Negligible tail waste |
 | **Prefix Memory Footprint** | $K \times \text{Tokens}$ duplicated | Shared with CoW (`ref_count`) | Near 100% prompt deduplication |
 
 ---
